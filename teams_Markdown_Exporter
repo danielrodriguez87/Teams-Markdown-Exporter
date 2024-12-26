@@ -1,0 +1,540 @@
+// Configuration
+const CONFIG = {
+    delayTime: 1000,
+    logToConsole: true,
+    maxScrollAttempts: 0,
+    retryAttempts: 5,
+    noNewMessagesThreshold: 3,
+    previewTheme: 'light'
+};
+
+let stopExport = false;
+
+function getChatName() {
+    const chatSelectors = [
+        '[data-tid="chat-header-text"]',
+        '[data-tid="chat-header-title"]',
+        '.chat-header-title',
+        '[data-tid="channel-header-title"]',
+        '.channel-name-text',
+        '[data-tid="meeting-chat-header"]',
+        '[role="heading"][aria-level="2"]',
+        '.title-wrapper',
+        '.chat-name',
+        '[data-tid="conversationHeader"]',
+        '.ts-title-text'
+    ];
+
+    for (const selector of chatSelectors) {
+        const element = document.querySelector(selector);
+        if (element && element.textContent.trim()) {
+            return cleanChatName(element.textContent.trim());
+        }
+    }
+
+    const participantNames = Array.from(document.querySelectorAll('[data-tid="message-username"]'))
+        .map(el => el.textContent.trim())
+        .filter((v, i, a) => a.indexOf(v) === i);
+
+    if (participantNames.length > 0) {
+        if (participantNames.length === 2) {
+            return `Chat with ${participantNames.join(' and ')}`;
+        } else {
+            return `Group Chat (${participantNames.length} participants)`;
+        }
+    }
+
+    return 'Teams Chat';
+}
+
+function cleanChatName(name) {
+    return name
+        .replace(/[<>:"/\\|?*]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function convertToMarkdown(messages, chatName) {
+    let markdown = `# ${chatName}\n\n`;
+    markdown += `*Teams Chat Export - ${new Date().toLocaleString()}*\n\n---\n\n`;
+
+    messages.forEach(msg => {
+        markdown += `### ${msg.sender} (${msg.timestamp})\n\n`;
+        let content = msg.content.replace(/`([^`]+)`/g, '```\n$1\n```');
+        markdown += `${content}\n\n`;
+
+        if (msg.images && msg.images.length > 0) {
+            msg.images.forEach(image => {
+                markdown += `![${image.alt}](${image.src})\n\n`;
+            });
+        }
+
+        markdown += '---\n\n';
+    });
+
+    return markdown;
+}
+
+function downloadMarkdown(markdown, filename) {
+    const blob = new Blob([markdown], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+const getSender = (messageElement) => {
+    const senderElement = messageElement.querySelector('[data-tid="message-author-name"]');
+    return senderElement ? senderElement.textContent.trim() : 'Unknown';
+};
+
+function createControlPanel(exportWindow, chatName) {
+    const controlPanel = exportWindow.document.createElement('div');
+    controlPanel.className = 'control-panel';
+
+    const titleSection = exportWindow.document.createElement('div');
+    titleSection.className = 'title-section';
+
+    const titleLabel = exportWindow.document.createElement('label');
+    titleLabel.textContent = 'Chat Title: ';
+
+    const titleInput = exportWindow.document.createElement('input');
+    titleInput.type = 'text';
+    titleInput.value = chatName;
+    titleInput.className = 'title-input';
+
+    titleSection.appendChild(titleLabel);
+    titleSection.appendChild(titleInput);
+
+    const fileNameSection = exportWindow.document.createElement('div');
+    fileNameSection.className = 'filename-section';
+
+    const fileNameLabel = exportWindow.document.createElement('label');
+    fileNameLabel.textContent = 'Export Filename: ';
+
+    const fileNameInput = exportWindow.document.createElement('input');
+    fileNameInput.type = 'text';
+    fileNameInput.value = `${chatName.replace(/[^a-z0-9]/gi, '_').toLowerCase()}-${new Date().toISOString().split('T')[0]}`;
+    fileNameInput.className = 'filename-input';
+
+    fileNameSection.appendChild(fileNameLabel);
+    fileNameSection.appendChild(fileNameInput);
+
+    const delayControl = exportWindow.document.createElement('div');
+    delayControl.className = 'control-item';
+
+    const delayLabel = exportWindow.document.createElement('label');
+    delayLabel.textContent = 'Scroll Delay (ms): ';
+
+    const delayInput = exportWindow.document.createElement('input');
+    delayInput.type = 'number';
+    delayInput.value = CONFIG.delayTime;
+    delayInput.min = '500';
+    delayInput.step = '100';
+
+    delayControl.appendChild(delayLabel);
+    delayControl.appendChild(delayInput);
+
+    const stopButton = exportWindow.document.createElement('button');
+    stopButton.textContent = 'Stop Export';
+    stopButton.className = 'stop-button';
+    stopButton.onclick = () => {
+        stopExport = true;
+        stopButton.textContent = 'Stopping...';
+        stopButton.disabled = true;
+    };
+
+    const downloadButton = exportWindow.document.createElement('button');
+    downloadButton.textContent = 'Download as Markdown';
+    downloadButton.className = 'download-button';
+
+    controlPanel.appendChild(titleSection);
+    controlPanel.appendChild(fileNameSection);
+    controlPanel.appendChild(delayControl);
+    controlPanel.appendChild(stopButton);
+    controlPanel.appendChild(downloadButton);
+
+    return { 
+        controlPanel, 
+        downloadButton, 
+        delayInput,
+        titleInput,
+        fileNameInput 
+    };
+}
+
+function createMarkdownPreview(exportWindow) {
+    const previewContainer = exportWindow.document.createElement('div');
+    previewContainer.className = 'preview-container';
+
+    const previewHeader = exportWindow.document.createElement('div');
+    previewHeader.className = 'preview-header';
+
+    const previewTitle = exportWindow.document.createElement('span');
+    previewTitle.textContent = 'Markdown Preview';
+
+    const toggleButton = exportWindow.document.createElement('button');
+    toggleButton.textContent = 'Toggle Preview';
+    toggleButton.className = 'toggle-preview-button';
+    toggleButton.onclick = () => {
+        const preview = exportWindow.document.querySelector('.preview-content');
+        preview.style.display = preview.style.display === 'none' ? 'block' : 'none';
+        toggleButton.textContent = preview.style.display === 'none' ? 'Show Preview' : 'Hide Preview';
+    };
+
+    const themeToggle = exportWindow.document.createElement('button');
+    themeToggle.textContent = 'Toggle Theme';
+    themeToggle.className = 'theme-toggle-button';
+    themeToggle.onclick = () => {
+        const preview = exportWindow.document.querySelector('.preview-content');
+        CONFIG.previewTheme = CONFIG.previewTheme === 'light' ? 'dark' : 'light';
+        preview.className = `preview-content ${CONFIG.previewTheme}-theme`;
+    };
+
+    previewHeader.appendChild(previewTitle);
+    previewHeader.appendChild(toggleButton);
+    previewHeader.appendChild(themeToggle);
+
+    const previewContent = exportWindow.document.createElement('div');
+    previewContent.className = `preview-content ${CONFIG.previewTheme}-theme`;
+
+    previewContainer.appendChild(previewHeader);
+    previewContainer.appendChild(previewContent);
+
+    return previewContainer;
+}
+
+function updatePreview(exportWindow, markdown) {
+    const previewContent = exportWindow.document.querySelector('.preview-content');
+    if (previewContent) {
+        let html = markdown
+            .replace(/### (.*?)\n/g, '<h3>$1</h3>')
+            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+            .replace(/\*(.*?)\*/g, '<em>$1</em>')
+            .replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>')
+            .replace(/`(.*?)`/g, '<code>$1</code>')
+            .replace(/!\[(.*?)\]\((.*?)\)/g, '<img alt="$1" src="$2">')
+            .replace(/\n\n/g, '<br><br>');
+
+        previewContent.innerHTML = html;
+    }
+}
+
+function createStyleSheet(exportWindow) {
+    const style = exportWindow.document.createElement('style');
+    style.textContent = `
+        body { 
+            font-family: Arial, sans-serif; 
+            margin: 20px; 
+            background: #f5f5f5; 
+            padding-top: 60px; 
+        }
+        .message { 
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 15px;
+            background: white;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .my-message {
+            background: #e3f2fd;
+            margin-left: 20%;
+        }
+        .other-message {
+            margin-right: 20%;
+        }
+        .timestamp { color: #666; font-size: 0.8em; }
+        .sender { font-weight: bold; color: #2b579a; margin: 5px 0; }
+        .content { margin-top: 5px; white-space: pre-wrap; }
+        .images { margin-top: 10px; }
+        .images img { max-width: 300px; margin: 5px; border: 1px solid #ddd; border-radius: 4px; }
+        .export-info { 
+            margin-top: 20px;
+            padding: 10px;
+            background: #fff;
+            border-radius: 8px;
+            text-align: center;
+            border-top: 2px solid #2b579a;
+        }
+        .control-panel {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: white;
+            padding: 10px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            z-index: 1000;
+        }
+        .control-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .control-item input {
+            width: 100px;
+            padding: 4px;
+        }
+        button {
+            background: #2b579a;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background-color 0.2s;
+        }
+        button:hover {
+            background: #1b3a6b;
+        }
+        button:disabled {
+            background: #cccccc;
+            cursor: not-allowed;
+        }
+        .stop-button {
+            background: #dc3545;
+        }
+        .stop-button:hover {
+            background: #c82333;
+        }
+        .preview-container {
+            position: fixed;
+            right: 20px;
+            top: 80px;
+            width: 400px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            z-index: 1000;
+        }
+        .preview-header {
+            padding: 10px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .preview-content {
+            padding: 15px;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        .preview-content.light-theme {
+            background: white;
+            color: #333;
+        }
+        .preview-content.dark-theme {
+            background: #1e1e1e;
+            color: #fff;
+        }
+        .preview-content code {
+            background: #f5f5f5;
+            padding: 2px 4px;
+            border-radius: 4px;
+        }
+        .preview-content.dark-theme code {
+            background: #2d2d2d;
+            color: #e6e6e6;
+        }
+        .toggle-preview-button,
+        .theme-toggle-button {
+            padding: 4px 8px;
+            margin-left: 10px;
+            font-size: 12px;
+        }
+        .title-section, 
+        .filename-section {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        .title-input, 
+        .filename-input {
+            width: 300px;
+            padding: 4px 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        .progress-info {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: white;
+            padding: 10px;
+            border-radius: 4px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+    `;
+    return style;
+}
+
+async function exportTeamsChat() {
+    try {
+        if (!window.location.hostname.includes('teams.microsoft.com')) {
+            throw new Error('Please run this script on teams.microsoft.com');
+        }
+
+        const messagePane = document.querySelector('[data-tid="message-pane-list-viewport"]');
+        if (!messagePane) {
+            throw new Error('Message pane not found. Please make sure you are in a Teams chat.');
+        }
+
+        const chatName = getChatName();
+        const messages = [];
+        let scrollCount = 0;
+        let keepScrolling = true;
+        let noNewMessagesCount = 0;
+        stopExport = false;
+
+        const exportWindow = window.open('', '_blank', 'width=800,height=900');
+        if (!exportWindow) {
+            throw new Error('Pop-up blocked. Please allow pop-ups and try again.');
+        }
+
+        exportWindow.document.head.appendChild(createStyleSheet(exportWindow));
+
+        const { controlPanel, downloadButton, delayInput, titleInput, fileNameInput } = createControlPanel(exportWindow, chatName);
+        exportWindow.document.body.appendChild(controlPanel);
+
+        const previewContainer = createMarkdownPreview(exportWindow);
+        exportWindow.document.body.appendChild(previewContainer);
+
+        const container = exportWindow.document.createElement('div');
+        container.id = 'messages-container';
+        exportWindow.document.body.appendChild(container);
+
+        const progressInfo = exportWindow.document.createElement('div');
+        progressInfo.className = 'progress-info';
+        container.appendChild(progressInfo);
+
+        while (keepScrolling && !stopExport) {
+            const beforeCount = messages.length;
+
+            CONFIG.delayTime = parseInt(delayInput.value) || 1000;
+
+            messagePane.scrollTop = 0;
+            await new Promise(resolve => setTimeout(resolve, CONFIG.delayTime));
+
+            progressInfo.textContent = `Loading messages... Found ${messages.length} so far`;
+
+            const messageElements = document.querySelectorAll('.fui-ChatMyMessage, .fui-unstable-ChatItem');
+
+            messageElements.forEach(msg => {
+                const timestamp = msg.querySelector('[id^="timestamp-"]');
+                if (!timestamp) return;
+
+                const messageId = timestamp.id.replace('timestamp-', '');
+                if (messages.find(m => m.id === messageId)) return;
+
+                const sender = getSender(msg);
+                const contentElement = msg.querySelector('[id^="content-"]');
+
+                const images = Array.from(msg.querySelectorAll('img'))
+                    .filter(img => {
+                        const src = img.src || '';
+                        return !src.includes('emoticons') && 
+                               !src.includes('presence') && 
+                               !src.includes('profilepicture');
+                    })
+                    .map(img => ({
+                        src: img.src || img.getAttribute('data-original-url') || img.getAttribute('data-url'),
+                        alt: img.alt || 'Image'
+                    }));
+
+                messages.push({
+                    id: messageId,
+                    timestamp: timestamp.textContent,
+                    sender: sender,
+                    content: contentElement ? contentElement.textContent.trim() : '',
+                    images: images,
+                    isMyMessage: msg.classList.contains('fui-ChatMyMessage')
+                });
+            });
+
+            if (messages.length === beforeCount) {
+                noNewMessagesCount++;
+                if (noNewMessagesCount >= CONFIG.noNewMessagesThreshold) {
+                    console.log(`No new messages found after ${CONFIG.noNewMessagesThreshold} attempts. Stopping scroll.`);
+                    keepScrolling = false;
+                }
+            } else {
+                noNewMessagesCount = 0;
+            }
+        }
+
+        messages.reverse().forEach(msg => {
+            const messageDiv = exportWindow.document.createElement('div');
+            messageDiv.className = `message ${msg.isMyMessage ? 'my-message' : 'other-message'}`;
+
+            const timestampDiv = exportWindow.document.createElement('div');
+            timestampDiv.className = 'timestamp';
+            timestampDiv.textContent = msg.timestamp;
+
+            const senderDiv = exportWindow.document.createElement('div');
+            senderDiv.className = 'sender';
+            senderDiv.textContent = msg.sender;
+
+            const contentDiv = exportWindow.document.createElement('div');
+            contentDiv.className = 'content';
+            contentDiv.textContent = msg.content || '[No message content]';
+
+            messageDiv.appendChild(timestampDiv);
+            messageDiv.appendChild(senderDiv);
+            messageDiv.appendChild(contentDiv);
+
+            if (msg.images.length > 0) {
+                const imagesDiv = exportWindow.document.createElement('div');
+                imagesDiv.className = 'images';
+                msg.images.forEach(image => {
+                    const img = exportWindow.document.createElement('img');
+                    img.src = image.src;
+                    img.alt = image.alt;
+                    imagesDiv.appendChild(img);
+                });
+                messageDiv.appendChild(imagesDiv);
+            }
+
+            container.appendChild(messageDiv);
+        });
+
+        downloadButton.addEventListener('click', () => {
+            const markdown = convertToMarkdown(messages, titleInput.value);
+            const filename = `${fileNameInput.value}.md`;
+            downloadMarkdown(markdown, filename);
+        });
+
+        titleInput.addEventListener('input', () => {
+            const markdown = convertToMarkdown(messages, titleInput.value);
+            updatePreview(exportWindow, markdown);
+            fileNameInput.value = `${titleInput.value.replace(/[^a-z0-9]/gi, '_').toLowerCase()}-${new Date().toISOString().split('T')[0]}`;
+        });
+
+        const exportInfo = exportWindow.document.createElement('div');
+        exportInfo.className = 'export-info';
+        exportInfo.textContent = `Exported ${messages.length} messages from "${chatName}" on ${new Date().toLocaleString()}`;
+        container.appendChild(exportInfo);
+
+        console.log(`Export complete! Found ${messages.length} messages.`);
+
+    } catch (error) {
+        console.error('Export failed:', error.message);
+    }
+}
+
+console.log(`
+Teams Chat Export Tool
+---------------------
+1. Make sure you're on teams.microsoft.com
+2. Navigate to the chat you want to export
+3. Click on any message in the chat
+4. Type exportTeamsChat() to start the export
+5. Use the controls to adjust scroll delay or stop the export
+6. Click "Download as Markdown" when ready
+`);
